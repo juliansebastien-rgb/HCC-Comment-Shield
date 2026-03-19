@@ -3,13 +3,14 @@
  * Plugin Name: HCC Comment Shield
  * Plugin URI: https://github.com/juliansebastien-rgb
  * Description: Shared anti-spam comment scoring powered by the HCC trust service.
- * Version: 1.2.0
+ * Version: 1.2.1
  * Author: Le Labo d'Azertaf
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * License: GPL-2.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain: hcc-comment-shield
+ * Update URI: https://github.com/juliansebastien-rgb/HCC-Comment-Shield
  */
 
 if (!defined('ABSPATH')) {
@@ -17,7 +18,12 @@ if (!defined('ABSPATH')) {
 }
 
 final class HCC_Comment_Shield {
-    private const VERSION = '1.2.0';
+    private const VERSION = '1.2.1';
+    private const TRANSIENT_PREFIX = 'hcc_comment_shield_';
+    private const GITHUB_REPOSITORY = 'juliansebastien-rgb/HCC-Comment-Shield';
+    private const GITHUB_API_BASE = 'https://api.github.com/repos/juliansebastien-rgb/HCC-Comment-Shield';
+    private const GITHUB_REPOSITORY_URL = 'https://github.com/juliansebastien-rgb/HCC-Comment-Shield';
+    private const UPDATE_CACHE_TTL = HOUR_IN_SECONDS;
     private const META_FEEDBACK = '_hcc_comment_feedback';
     private const SERVICE_URL = 'https://trust.mapage-wp.online';
     private const WEEKLY_EVENT = 'hcc_comment_shield_weekly_summary';
@@ -49,6 +55,10 @@ final class HCC_Comment_Shield {
         add_action('wp_dashboard_setup', [$this, 'register_dashboard_widget']);
         add_filter('cron_schedules', [$this, 'register_cron_schedule']);
         add_filter('plugin_action_links_' . plugin_basename(__FILE__), [$this, 'plugin_action_links']);
+        add_filter('pre_set_site_transient_update_plugins', [$this, 'inject_github_update']);
+        add_filter('plugins_api', [$this, 'filter_plugin_information'], 20, 3);
+        add_filter('upgrader_source_selection', [$this, 'normalize_github_update_source'], 10, 4);
+        add_action('upgrader_process_complete', [$this, 'clear_update_cache'], 10, 2);
 
         add_filter('preprocess_comment', [$this, 'analyze_comment'], 20);
         add_filter('pre_comment_approved', [$this, 'filter_comment_approval'], 20, 2);
@@ -243,6 +253,201 @@ final class HCC_Comment_Shield {
     public function plugin_action_links(array $links): array {
         array_unshift($links, '<a href="' . esc_url(admin_url('options-general.php?page=hcc-comment-shield')) . '">Settings</a>');
         return $links;
+    }
+
+    public function inject_github_update($transient) {
+        if (!is_object($transient) || empty($transient->checked)) {
+            return $transient;
+        }
+
+        $release = $this->get_github_release_data();
+        if (!$release || empty($release['version'])) {
+            return $transient;
+        }
+
+        if (version_compare(self::VERSION, $release['version'], '>=')) {
+            return $transient;
+        }
+
+        $plugin_file = plugin_basename(__FILE__);
+        $update = (object) [
+            'slug' => 'hcc-comment-shield',
+            'plugin' => $plugin_file,
+            'new_version' => $release['version'],
+            'url' => $release['url'],
+            'package' => $release['package'],
+            'icons' => [],
+            'banners' => [],
+            'banners_rtl' => [],
+            'tested' => '6.9',
+            'requires_php' => '7.4',
+            'compatibility' => new stdClass(),
+        ];
+
+        $transient->response[$plugin_file] = $update;
+
+        return $transient;
+    }
+
+    public function filter_plugin_information($result, string $action, $args) {
+        if ($action !== 'plugin_information' || !is_object($args) || empty($args->slug) || $args->slug !== 'hcc-comment-shield') {
+            return $result;
+        }
+
+        $release = $this->get_github_release_data();
+        if (!$release) {
+            return $result;
+        }
+
+        return (object) [
+            'name' => 'HCC Comment Shield',
+            'slug' => 'hcc-comment-shield',
+            'version' => $release['version'],
+            'author' => '<a href="https://github.com/juliansebastien-rgb">Le Labo d&#039;Azertaf</a>',
+            'author_profile' => 'https://github.com/juliansebastien-rgb',
+            'homepage' => self::GITHUB_REPOSITORY_URL,
+            'requires' => '6.0',
+            'requires_php' => '7.4',
+            'tested' => '6.9',
+            'last_updated' => $release['published_at'],
+            'download_link' => $release['package'],
+            'sections' => [
+                'description' => 'Standalone WordPress comment anti-spam powered by the HCC trust service.',
+                'installation' => 'Install the plugin, activate it, then configure the protection mode, local rules, dashboard widget usage and weekly summary email in Settings > HCC Comment Shield.',
+                'changelog' => sprintf("= %s =\n* GitHub release package.\n", $release['version']),
+            ],
+            'banners' => [],
+            'icons' => [],
+        ];
+    }
+
+    public function clear_update_cache($upgrader, array $hook_extra): void {
+        if (($hook_extra['type'] ?? '') !== 'plugin') {
+            return;
+        }
+
+        $plugins = $hook_extra['plugins'] ?? [];
+
+        if (in_array(plugin_basename(__FILE__), $plugins, true)) {
+            delete_transient(self::TRANSIENT_PREFIX . 'github_release');
+        }
+    }
+
+    public function normalize_github_update_source(string $source, string $remote_source, $upgrader, array $hook_extra): string {
+        if (($hook_extra['type'] ?? '') !== 'plugin') {
+            return $source;
+        }
+
+        $plugins = $hook_extra['plugins'] ?? [];
+        if (!in_array(plugin_basename(__FILE__), $plugins, true)) {
+            return $source;
+        }
+
+        $normalized = trailingslashit($remote_source) . 'hcc-comment-shield';
+
+        if ($source === $normalized || !is_dir($source)) {
+            return $source;
+        }
+
+        if (@rename($source, $normalized)) {
+            return $normalized;
+        }
+
+        return $source;
+    }
+
+    private function get_github_release_data(): ?array {
+        $cache_key = self::TRANSIENT_PREFIX . 'github_release';
+        $cached = get_transient($cache_key);
+
+        if (is_array($cached)) {
+            return $cached;
+        }
+
+        $release = $this->request_github_release('/releases/latest');
+
+        if (!$release) {
+            $tag = $this->request_github_release('/tags');
+            if (!$tag || empty($tag[0]['name'])) {
+                return null;
+            }
+
+            $first_tag = $tag[0];
+            $release = [
+                'tag_name' => $first_tag['name'],
+                'zipball_url' => self::GITHUB_API_BASE . '/zipball/' . rawurlencode($first_tag['name']),
+                'html_url' => self::GITHUB_REPOSITORY_URL . '/releases/tag/' . rawurlencode($first_tag['name']),
+                'published_at' => gmdate('Y-m-d H:i:s'),
+                'body' => '',
+            ];
+        }
+
+        if (empty($release['tag_name'])) {
+            return null;
+        }
+
+        $package = '';
+        if (!empty($release['assets']) && is_array($release['assets'])) {
+            foreach ($release['assets'] as $asset) {
+                if (!is_array($asset)) {
+                    continue;
+                }
+
+                $name = isset($asset['name']) ? (string) $asset['name'] : '';
+                $download = isset($asset['browser_download_url']) ? (string) $asset['browser_download_url'] : '';
+
+                if ($name !== '' && substr($name, -4) === '.zip' && $download !== '') {
+                    $package = $download;
+                    break;
+                }
+            }
+        }
+
+        if ($package === '' && !empty($release['zipball_url'])) {
+            $package = (string) $release['zipball_url'];
+        }
+
+        if ($package === '') {
+            return null;
+        }
+
+        $data = [
+            'version' => ltrim((string) $release['tag_name'], 'v'),
+            'package' => $package,
+            'url' => !empty($release['html_url']) ? (string) $release['html_url'] : self::GITHUB_REPOSITORY_URL,
+            'published_at' => !empty($release['published_at']) ? gmdate('Y-m-d H:i:s', strtotime((string) $release['published_at'])) : gmdate('Y-m-d H:i:s'),
+            'body' => !empty($release['body']) ? (string) $release['body'] : '',
+        ];
+
+        set_transient($cache_key, $data, self::UPDATE_CACHE_TTL);
+
+        return $data;
+    }
+
+    private function request_github_release(string $path) {
+        $response = wp_remote_get(
+            self::GITHUB_API_BASE . $path,
+            [
+                'timeout' => 15,
+                'headers' => [
+                    'Accept' => 'application/vnd.github+json',
+                    'User-Agent' => 'HCC Comment Shield/' . self::VERSION . '; ' . home_url('/'),
+                ],
+            ]
+        );
+
+        if (is_wp_error($response)) {
+            return null;
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            return null;
+        }
+
+        $data = json_decode((string) wp_remote_retrieve_body($response), true);
+
+        return is_array($data) ? $data : null;
     }
 
     public function register_cron_schedule(array $schedules): array {
@@ -899,6 +1104,10 @@ final class HCC_Comment_Shield {
             $tips[] = 'Many comments are landing in moderation. If that creates too much manual work, try Strict mode for a week.';
         }
 
+        if (($stats['spam'] ?? 0) >= 10) {
+            $tips[] = 'Spam pressure is elevated this week. Keep an eye on your top domains and consider tightening local blacklists.';
+        }
+
         if (($stats['feedback_spam'] ?? 0) >= 5) {
             $tips[] = 'You confirmed several spam comments recently. HCC is now learning those patterns across your sites.';
         }
@@ -917,6 +1126,8 @@ final class HCC_Comment_Shield {
             $tips[] = 'Sender reputation is now part of the model. Repeat offender emails, IPs and URLs should be blocked faster over time.';
         } elseif ($top_flag === 'spam_keywords' || $top_flag === 'spam_keyword') {
             $tips[] = 'Recurring spam keywords are showing up. Add the most obvious terms to the local blacklist for immediate blocking.';
+        } elseif ($top_flag === 'confirmed_spam_email' || $top_flag === 'seen_in_spam_ip' || $top_flag === 'seen_in_spam_email_domain') {
+            $tips[] = 'The shared reputation layer is catching repeat senders. The more feedback you confirm, the faster those senders are downgraded.';
         }
 
         if (empty($tips)) {

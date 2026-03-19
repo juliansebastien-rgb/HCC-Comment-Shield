@@ -3,7 +3,7 @@ Contributors: mapage
 Tags: comments, spam, anti-spam, moderation, security
 Requires at least: 6.0
 Tested up to: 6.9
-Stable tag: 1.2.0
+Stable tag: 1.2.1
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -55,6 +55,10 @@ Yes. When you mark a comment as spam, approve a moderated comment, or restore a 
 It summarizes the last few days of comment activity and suggests practical actions, such as moving to Strict mode or blacklisting recurring spam domains.
 
 == Changelog ==
+
+= 1.2.1 =
+* Added native GitHub update support inside WordPress.
+* Improved HCC AI Tips with stronger sender-reputation guidance.
 
 = 1.2.0 =
 * Added WordPress dashboard AI tips widget.
