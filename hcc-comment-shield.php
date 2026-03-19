@@ -3,7 +3,7 @@
  * Plugin Name: HCC Comment Shield
  * Plugin URI: https://github.com/juliansebastien-rgb
  * Description: Shared anti-spam comment scoring powered by the HCC trust service.
- * Version: 0.2.0
+ * Version: 1.0.0
  * Author: Le Labo d'Azertaf
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -17,7 +17,7 @@ if (!defined('ABSPATH')) {
 }
 
 final class HCC_Comment_Shield {
-    private const VERSION = '0.2.0';
+    private const VERSION = '1.0.0';
     private const SERVICE_URL = 'https://trust.mapage-wp.online';
     private const OPTION_MODE = 'hcc_comment_shield_mode';
     private const OPTION_MODERATE = 'hcc_comment_shield_moderate_medium_risk';
@@ -43,6 +43,7 @@ final class HCC_Comment_Shield {
         add_filter('preprocess_comment', [$this, 'analyze_comment'], 20);
         add_filter('pre_comment_approved', [$this, 'filter_comment_approval'], 20, 2);
         add_action('comment_post', [$this, 'persist_comment_meta'], 20, 3);
+        add_action('transition_comment_status', [$this, 'handle_comment_status_transition'], 20, 3);
     }
 
     public function register_settings(): void {
@@ -493,6 +494,51 @@ final class HCC_Comment_Shield {
         add_comment_meta($comment_id, self::META_ACTION, (string) ($this->last_decision['recommended_action'] ?? ''), true);
         add_comment_meta($comment_id, self::META_FLAGS, wp_json_encode($this->last_decision['flags'] ?? []), true);
         add_comment_meta($comment_id, self::META_REASONS, wp_json_encode($this->last_decision['reasons'] ?? []), true);
+    }
+
+    public function handle_comment_status_transition(string $new_status, string $old_status, WP_Comment $comment): void {
+        if ($new_status === $old_status) {
+            return;
+        }
+
+        $feedback = '';
+
+        if ($new_status === 'spam') {
+            $feedback = 'spam_confirmed';
+        } elseif ($new_status === 'approved' && in_array($old_status, ['hold', '0', 'unapproved'], true)) {
+            $feedback = 'approved';
+        } elseif ($new_status === 'approved' && $old_status === 'spam') {
+            $feedback = 'false_positive';
+        }
+
+        if ($feedback === '') {
+            return;
+        }
+
+        $payload = [
+            'site_url' => home_url('/'),
+            'site_name' => get_bloginfo('name'),
+            'comment_id' => (int) $comment->comment_ID,
+            'post_id' => (int) $comment->comment_post_ID,
+            'post_title' => get_the_title((int) $comment->comment_post_ID),
+            'user_email' => (string) $comment->comment_author_email,
+            'author_url' => (string) $comment->comment_author_url,
+            'comment_content' => (string) $comment->comment_content,
+            'ip' => (string) $comment->comment_author_IP,
+            'user_agent' => (string) $comment->comment_agent,
+            'feedback' => $feedback,
+        ];
+
+        wp_remote_post(
+            trailingslashit(self::SERVICE_URL) . 'v1/comment-feedback',
+            [
+                'timeout' => $this->get_timeout(),
+                'headers' => [
+                    'Content-Type' => 'application/json',
+                ],
+                'body' => wp_json_encode($payload),
+            ]
+        );
     }
 
     /**
