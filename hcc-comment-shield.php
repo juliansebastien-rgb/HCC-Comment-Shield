@@ -3,7 +3,7 @@
  * Plugin Name: HCC Comment Shield
  * Plugin URI: https://github.com/juliansebastien-rgb
  * Description: Shared anti-spam comment scoring powered by the HCC trust service.
- * Version: 1.0.0
+ * Version: 1.0.1
  * Author: Le Labo d'Azertaf
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -17,7 +17,8 @@ if (!defined('ABSPATH')) {
 }
 
 final class HCC_Comment_Shield {
-    private const VERSION = '1.0.0';
+    private const VERSION = '1.0.1';
+    private const META_FEEDBACK = '_hcc_comment_feedback';
     private const SERVICE_URL = 'https://trust.mapage-wp.online';
     private const OPTION_MODE = 'hcc_comment_shield_mode';
     private const OPTION_MODERATE = 'hcc_comment_shield_moderate_medium_risk';
@@ -339,6 +340,7 @@ final class HCC_Comment_Shield {
                             $action = get_comment_meta($comment->comment_ID, self::META_ACTION, true);
                             $flags = get_comment_meta($comment->comment_ID, self::META_FLAGS, true);
                             $reasons = get_comment_meta($comment->comment_ID, self::META_REASONS, true);
+                            $feedback = get_comment_meta($comment->comment_ID, self::META_FEEDBACK, true);
                             ?>
                             <tr>
                                 <td><?php echo esc_html((string) $comment->comment_date); ?></td>
@@ -346,7 +348,7 @@ final class HCC_Comment_Shield {
                                 <td><?php echo esc_html((string) $comment->comment_author_email); ?></td>
                                 <td><?php echo esc_html(get_the_title((int) $comment->comment_post_ID)); ?></td>
                                 <td><?php echo esc_html((string) $score); ?></td>
-                                <td><?php echo esc_html((string) $action); ?></td>
+                                <td><?php echo esc_html((string) $action); ?><?php if ($feedback !== '') : ?><br><small>feedback: <?php echo esc_html((string) $feedback); ?></small><?php endif; ?></td>
                                 <td><code><?php echo esc_html((string) $flags); ?></code></td>
                                 <td><code><?php echo esc_html((string) $reasons); ?></code></td>
                             </tr>
@@ -514,6 +516,8 @@ final class HCC_Comment_Shield {
         if ($feedback === '') {
             return;
         }
+
+        update_comment_meta($comment->comment_ID, self::META_FEEDBACK, $feedback);
 
         $payload = [
             'site_url' => home_url('/'),
