@@ -3,7 +3,7 @@
  * Plugin Name: HCC Comment Shield
  * Plugin URI: https://github.com/juliansebastien-rgb
  * Description: Shared anti-spam comment scoring powered by the HCC trust service.
- * Version: 1.0.1
+ * Version: 1.2.0
  * Author: Le Labo d'Azertaf
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -17,13 +17,16 @@ if (!defined('ABSPATH')) {
 }
 
 final class HCC_Comment_Shield {
-    private const VERSION = '1.0.1';
+    private const VERSION = '1.2.0';
     private const META_FEEDBACK = '_hcc_comment_feedback';
     private const SERVICE_URL = 'https://trust.mapage-wp.online';
+    private const WEEKLY_EVENT = 'hcc_comment_shield_weekly_summary';
     private const OPTION_MODE = 'hcc_comment_shield_mode';
     private const OPTION_MODERATE = 'hcc_comment_shield_moderate_medium_risk';
     private const OPTION_SPAM = 'hcc_comment_shield_mark_high_risk_spam';
     private const OPTION_TIMEOUT = 'hcc_comment_shield_timeout';
+    private const OPTION_WEEKLY_EMAIL_ENABLED = 'hcc_comment_shield_weekly_email_enabled';
+    private const OPTION_WEEKLY_EMAIL_RECIPIENT = 'hcc_comment_shield_weekly_email_recipient';
     private const OPTION_WHITELIST_EMAILS = 'hcc_comment_shield_whitelist_emails';
     private const OPTION_WHITELIST_DOMAINS = 'hcc_comment_shield_whitelist_domains';
     private const OPTION_BLACKLIST_DOMAINS = 'hcc_comment_shield_blacklist_domains';
@@ -37,14 +40,37 @@ final class HCC_Comment_Shield {
     private ?array $last_decision = null;
 
     public function boot(): void {
+        register_activation_hook(__FILE__, [$this, 'activate']);
+        register_deactivation_hook(__FILE__, [$this, 'deactivate']);
+
+        add_action('init', [$this, 'ensure_weekly_event']);
         add_action('admin_init', [$this, 'register_settings']);
         add_action('admin_menu', [$this, 'register_settings_page']);
+        add_action('wp_dashboard_setup', [$this, 'register_dashboard_widget']);
+        add_filter('cron_schedules', [$this, 'register_cron_schedule']);
         add_filter('plugin_action_links_' . plugin_basename(__FILE__), [$this, 'plugin_action_links']);
 
         add_filter('preprocess_comment', [$this, 'analyze_comment'], 20);
         add_filter('pre_comment_approved', [$this, 'filter_comment_approval'], 20, 2);
         add_action('comment_post', [$this, 'persist_comment_meta'], 20, 3);
         add_action('transition_comment_status', [$this, 'handle_comment_status_transition'], 20, 3);
+        add_action(self::WEEKLY_EVENT, [$this, 'send_weekly_summary_email']);
+    }
+
+    public function activate(): void {
+        if (!wp_next_scheduled(self::WEEKLY_EVENT)) {
+            wp_schedule_event(time() + DAY_IN_SECONDS, 'weekly', self::WEEKLY_EVENT);
+        }
+    }
+
+    public function deactivate(): void {
+        wp_clear_scheduled_hook(self::WEEKLY_EVENT);
+    }
+
+    public function ensure_weekly_event(): void {
+        if (!wp_next_scheduled(self::WEEKLY_EVENT)) {
+            wp_schedule_event(time() + DAY_IN_SECONDS, 'weekly', self::WEEKLY_EVENT);
+        }
     }
 
     public function register_settings(): void {
@@ -85,6 +111,26 @@ final class HCC_Comment_Shield {
                 'type' => 'integer',
                 'sanitize_callback' => [$this, 'sanitize_timeout'],
                 'default' => 10,
+            ]
+        );
+
+        register_setting(
+            'hcc_comment_shield_settings',
+            self::OPTION_WEEKLY_EMAIL_ENABLED,
+            [
+                'type' => 'boolean',
+                'sanitize_callback' => [$this, 'sanitize_checkbox'],
+                'default' => true,
+            ]
+        );
+
+        register_setting(
+            'hcc_comment_shield_settings',
+            self::OPTION_WEEKLY_EMAIL_RECIPIENT,
+            [
+                'type' => 'string',
+                'sanitize_callback' => 'sanitize_email',
+                'default' => get_option('admin_email', ''),
             ]
         );
 
@@ -199,6 +245,29 @@ final class HCC_Comment_Shield {
         return $links;
     }
 
+    public function register_cron_schedule(array $schedules): array {
+        if (!isset($schedules['weekly'])) {
+            $schedules['weekly'] = [
+                'interval' => 7 * DAY_IN_SECONDS,
+                'display' => 'Once Weekly',
+            ];
+        }
+
+        return $schedules;
+    }
+
+    public function register_dashboard_widget(): void {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+
+        wp_add_dashboard_widget(
+            'hcc_comment_shield_ai_tips',
+            'HCC AI Tips',
+            [$this, 'render_dashboard_widget']
+        );
+    }
+
     public function render_settings_page(): void {
         if (!current_user_can('manage_options')) {
             return;
@@ -260,6 +329,22 @@ final class HCC_Comment_Shield {
                         <th scope="row">Request timeout</th>
                         <td>
                             <input type="number" min="3" max="30" name="<?php echo esc_attr(self::OPTION_TIMEOUT); ?>" value="<?php echo esc_attr((string) $this->get_timeout()); ?>" />
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Weekly summary email</th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="<?php echo esc_attr(self::OPTION_WEEKLY_EMAIL_ENABLED); ?>" value="1" <?php checked($this->is_weekly_email_enabled()); ?> />
+                                Send a weekly HCC anti-spam summary email.
+                            </label>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Weekly summary recipient</th>
+                        <td>
+                            <input type="email" class="regular-text" name="<?php echo esc_attr(self::OPTION_WEEKLY_EMAIL_RECIPIENT); ?>" value="<?php echo esc_attr($this->get_weekly_email_recipient()); ?>" />
+                            <p class="description">Default: WordPress admin email.</p>
                         </td>
                     </tr>
                     <tr>
@@ -358,6 +443,41 @@ final class HCC_Comment_Shield {
             </table>
         </div>
         <?php
+    }
+
+    public function render_dashboard_widget(): void {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+
+        $stats = $this->build_recent_stats(7, 50);
+        $tips = $this->build_ai_tips($stats);
+        $top_domain = array_key_first($stats['problem_domains']);
+        $top_flag = array_key_first($stats['problem_flags']);
+
+        echo '<p>Recent anti-spam snapshot for this site.</p>';
+        echo '<ul>';
+        echo '<li><strong>Allow:</strong> ' . esc_html((string) $stats['allow']) . '</li>';
+        echo '<li><strong>Moderate:</strong> ' . esc_html((string) $stats['moderate']) . '</li>';
+        echo '<li><strong>Spam:</strong> ' . esc_html((string) $stats['spam']) . '</li>';
+        echo '<li><strong>Admin spam confirmations:</strong> ' . esc_html((string) $stats['feedback_spam']) . '</li>';
+        echo '</ul>';
+
+        echo '<p><strong>AI tips</strong></p><ul>';
+        foreach ($tips as $tip) {
+            echo '<li>' . esc_html($tip) . '</li>';
+        }
+        echo '</ul>';
+
+        if ($top_domain) {
+            echo '<p><strong>Top spam domain:</strong> <code>' . esc_html($top_domain) . '</code></p>';
+        }
+
+        if ($top_flag) {
+            echo '<p><strong>Top detected pattern:</strong> <code>' . esc_html($top_flag) . '</code></p>';
+        }
+
+        echo '<p><a href="' . esc_url(admin_url('options-general.php?page=hcc-comment-shield-logs')) . '">Open HCC Comment Shield Logs</a></p>';
     }
 
     /**
@@ -545,6 +665,64 @@ final class HCC_Comment_Shield {
         );
     }
 
+    public function send_weekly_summary_email(): void {
+        if (!$this->is_weekly_email_enabled()) {
+            return;
+        }
+
+        $recipient = $this->get_weekly_email_recipient();
+        if ($recipient === '') {
+            return;
+        }
+
+        $stats = $this->build_recent_stats(7, 250);
+        $tips = $this->build_ai_tips($stats);
+        $subject = sprintf('HCC Weekly Anti-Spam Summary - %s', wp_specialchars_decode(get_bloginfo('name'), ENT_QUOTES));
+
+        $html = '<html><body style="font-family:Arial,sans-serif;background:#f5f7fb;color:#0f172a;padding:24px;">';
+        $html .= '<div style="max-width:760px;margin:0 auto;background:#fff;border:1px solid #dbe4f0;border-radius:18px;padding:24px;">';
+        $html .= '<h1 style="margin-top:0;">HCC Weekly Anti-Spam Summary</h1>';
+        $html .= '<p style="color:#475569;">Site: <strong>' . esc_html(home_url('/')) . '</strong><br>Period: last 7 days</p>';
+        $html .= '<table style="width:100%;border-collapse:collapse;margin:18px 0;"><tr>';
+        $html .= '<td style="padding:12px;border:1px solid #e5e7eb;"><strong>Allow</strong><br>' . esc_html((string) $stats['allow']) . '</td>';
+        $html .= '<td style="padding:12px;border:1px solid #e5e7eb;"><strong>Moderate</strong><br>' . esc_html((string) $stats['moderate']) . '</td>';
+        $html .= '<td style="padding:12px;border:1px solid #e5e7eb;"><strong>Spam</strong><br>' . esc_html((string) $stats['spam']) . '</td>';
+        $html .= '<td style="padding:12px;border:1px solid #e5e7eb;"><strong>Confirmed spam</strong><br>' . esc_html((string) $stats['feedback_spam']) . '</td>';
+        $html .= '</tr></table>';
+
+        $html .= '<h2 style="font-size:18px;">HCC AI Tips</h2><ul>';
+        foreach ($tips as $tip) {
+            $html .= '<li>' . esc_html($tip) . '</li>';
+        }
+        $html .= '</ul>';
+
+        if (!empty($stats['problem_domains'])) {
+            $html .= '<h2 style="font-size:18px;">Top spam domains</h2><ul>';
+            foreach (array_slice($stats['problem_domains'], 0, 5, true) as $domain => $count) {
+                $html .= '<li><code>' . esc_html($domain) . '</code> - ' . esc_html((string) $count) . ' confirmations</li>';
+            }
+            $html .= '</ul>';
+        }
+
+        if (!empty($stats['problem_flags'])) {
+            $html .= '<h2 style="font-size:18px;">Top patterns</h2><ul>';
+            foreach (array_slice($stats['problem_flags'], 0, 5, true) as $flag => $count) {
+                $html .= '<li><code>' . esc_html($flag) . '</code> - ' . esc_html((string) $count) . '</li>';
+            }
+            $html .= '</ul>';
+        }
+
+        $html .= '<p style="margin-top:24px;"><a href="' . esc_url(admin_url('options-general.php?page=hcc-comment-shield-logs')) . '" style="display:inline-block;background:#0f172a;color:#fff;text-decoration:none;padding:12px 18px;border-radius:10px;">Open HCC Comment Shield Logs</a></p>';
+        $html .= '</div></body></html>';
+
+        wp_mail(
+            $recipient,
+            $subject,
+            $html,
+            ['Content-Type: text/html; charset=UTF-8']
+        );
+    }
+
     /**
      * @param array<string,mixed> $decision
      * @return array<string,mixed>
@@ -579,6 +757,15 @@ final class HCC_Comment_Shield {
     private function get_mode(): string {
         $value = get_option(self::OPTION_MODE, 'balanced');
         return is_string($value) ? $value : 'balanced';
+    }
+
+    private function is_weekly_email_enabled(): bool {
+        return !empty(get_option(self::OPTION_WEEKLY_EMAIL_ENABLED, true));
+    }
+
+    private function get_weekly_email_recipient(): string {
+        $value = get_option(self::OPTION_WEEKLY_EMAIL_RECIPIENT, get_option('admin_email', ''));
+        return is_string($value) ? trim($value) : '';
     }
 
     /**
@@ -633,6 +820,110 @@ final class HCC_Comment_Shield {
             }
         }
         return '';
+    }
+
+    /**
+     * @return array<string,mixed>
+     */
+    private function build_recent_stats(int $days = 7, int $limit = 50): array {
+        $comments = get_comments([
+            'number' => $limit,
+            'status' => 'all',
+            'orderby' => 'comment_ID',
+            'order' => 'DESC',
+            'date_query' => [
+                [
+                    'after' => gmdate('Y-m-d H:i:s', time() - ($days * DAY_IN_SECONDS)),
+                ],
+            ],
+            'meta_query' => [
+                [
+                    'key' => self::META_ACTION,
+                    'compare' => 'EXISTS',
+                ],
+            ],
+        ]);
+
+        $stats = [
+            'spam' => 0,
+            'moderate' => 0,
+            'allow' => 0,
+            'feedback_spam' => 0,
+            'problem_domains' => [],
+            'problem_flags' => [],
+        ];
+
+        foreach ($comments as $comment) {
+            $action = (string) get_comment_meta($comment->comment_ID, self::META_ACTION, true);
+            $feedback = (string) get_comment_meta($comment->comment_ID, self::META_FEEDBACK, true);
+            $flags_json = (string) get_comment_meta($comment->comment_ID, self::META_FLAGS, true);
+            $email = strtolower((string) $comment->comment_author_email);
+            $domain = str_contains($email, '@') ? substr(strrchr($email, '@'), 1) : '';
+
+            if (isset($stats[$action])) {
+                $stats[$action]++;
+            }
+
+            if ($feedback === 'spam_confirmed') {
+                $stats['feedback_spam']++;
+                if ($domain !== '') {
+                    $stats['problem_domains'][$domain] = ($stats['problem_domains'][$domain] ?? 0) + 1;
+                }
+            }
+
+            $flags = json_decode($flags_json, true);
+            if (is_array($flags)) {
+                foreach ($flags as $flag) {
+                    if (!is_string($flag) || $flag === '') {
+                        continue;
+                    }
+                    $stats['problem_flags'][$flag] = ($stats['problem_flags'][$flag] ?? 0) + 1;
+                }
+            }
+        }
+
+        arsort($stats['problem_domains']);
+        arsort($stats['problem_flags']);
+
+        return $stats;
+    }
+
+    /**
+     * @param array<string,mixed> $stats
+     * @return string[]
+     */
+    private function build_ai_tips(array $stats): array {
+        $tips = [];
+
+        if (($stats['moderate'] ?? 0) >= 8) {
+            $tips[] = 'Many comments are landing in moderation. If that creates too much manual work, try Strict mode for a week.';
+        }
+
+        if (($stats['feedback_spam'] ?? 0) >= 5) {
+            $tips[] = 'You confirmed several spam comments recently. HCC is now learning those patterns across your sites.';
+        }
+
+        $top_domain = array_key_first($stats['problem_domains'] ?? []);
+        if ($top_domain) {
+            $tips[] = 'The domain ' . $top_domain . ' keeps appearing in confirmed spam. Consider adding it to the local blacklist.';
+        }
+
+        $top_flag = array_key_first($stats['problem_flags'] ?? []);
+        if ($top_flag === 'has_link' || $top_flag === 'many_links' || $top_flag === 'high_link_density') {
+            $tips[] = 'Links are still the main spam signal. Keep automatic spam marking enabled for high-risk comments.';
+        } elseif ($top_flag === 'confirmed_spam_pattern' || $top_flag === 'reused_comment_text') {
+            $tips[] = 'Repeated comment texts are being detected. Shared learning across sites is actively helping here.';
+        } elseif ($top_flag === 'confirmed_spam_email_domain' || $top_flag === 'confirmed_spam_ip' || $top_flag === 'confirmed_spam_author_domain') {
+            $tips[] = 'Sender reputation is now part of the model. Repeat offender emails, IPs and URLs should be blocked faster over time.';
+        } elseif ($top_flag === 'spam_keywords' || $top_flag === 'spam_keyword') {
+            $tips[] = 'Recurring spam keywords are showing up. Add the most obvious terms to the local blacklist for immediate blocking.';
+        }
+
+        if (empty($tips)) {
+            $tips[] = 'Nothing abnormal stands out right now. Balanced mode remains the safest default.';
+        }
+
+        return $tips;
     }
 
     private function should_moderate_medium_risk(): bool {
