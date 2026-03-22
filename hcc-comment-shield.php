@@ -484,10 +484,10 @@ final class HCC_Comment_Shield {
 
         ?>
         <div class="wrap">
-            <p style="margin:16px 0 12px;">
+            <h1>HCC Comment Shield</h1>
+            <p style="margin:12px 0 12px;">
                 <img src="<?php echo esc_url($logo_url); ?>" alt="HCC Comment Shield" style="width:120px;height:auto;display:block;" />
             </p>
-            <h1>HCC Comment Shield</h1>
             <p>Shared anti-spam comment scoring powered by the HCC trust service.</p>
             <form method="post" action="options.php">
                 <?php settings_fields('hcc_comment_shield_settings'); ?>
