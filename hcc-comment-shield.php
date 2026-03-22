@@ -3,7 +3,7 @@
  * Plugin Name: HCC Comment Shield
  * Plugin URI: https://github.com/juliansebastien-rgb
  * Description: Shared anti-spam comment scoring powered by the HCC trust service.
- * Version: 1.2.2
+ * Version: 1.2.3
  * Author: Le Labo d'Azertaf
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -18,7 +18,7 @@ if (!defined('ABSPATH')) {
 }
 
 final class HCC_Comment_Shield {
-    private const VERSION = '1.2.2';
+    private const VERSION = '1.2.3';
     private const TRANSIENT_PREFIX = 'hcc_comment_shield_';
     private const GITHUB_REPOSITORY = 'juliansebastien-rgb/HCC-Comment-Shield';
     private const GITHUB_API_BASE = 'https://api.github.com/repos/juliansebastien-rgb/HCC-Comment-Shield';
@@ -480,9 +480,13 @@ final class HCC_Comment_Shield {
 
         $site_url = home_url('/');
         $mode = $this->get_mode();
+        $logo_url = plugin_dir_url(__FILE__) . 'assets/images/hcc-comment-shield-logo.png';
 
         ?>
         <div class="wrap">
+            <p style="margin:16px 0 12px;">
+                <img src="<?php echo esc_url($logo_url); ?>" alt="HCC Comment Shield" style="width:120px;height:auto;display:block;" />
+            </p>
             <h1>HCC Comment Shield</h1>
             <p>Shared anti-spam comment scoring powered by the HCC trust service.</p>
             <form method="post" action="options.php">
